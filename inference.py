@@ -2,15 +2,18 @@ from os import listdir, path
 import numpy as np
 import scipy, cv2, os, sys, argparse, audio
 import json, subprocess, random, string
-from tqdm import tqdm
-from glob import glob
+# from tqdm import tqdm
+# from glob import glob
 import torch, face_detection
 from models import Wav2Lip
 import platform
+import time
+from npy_append_array import NpyAppendArray
+from basicsr.utils import imwrite
 
 parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
 
-parser.add_argument('--checkpoint_path', type=str, 
+parser.add_argument('--checkpoint_path', type=str,
 					help='Name of saved checkpoint to load weights from', required=True)
 
 parser.add_argument('--face', type=str, 
@@ -20,16 +23,12 @@ parser.add_argument('--audio', type=str,
 parser.add_argument('--outfile', type=str, help='Video path to save result. See default for an e.g.', 
 								default='results/result_voice.mp4')
 
-parser.add_argument('--static', type=bool, 
-					help='If True, then use only first video frame for inference', default=False)
-parser.add_argument('--fps', type=float, help='Can be specified only if input is a static image (default: 25)', 
-					default=25., required=False)
-
-parser.add_argument('--pads', nargs='+', type=int, default=[0, 10, 0, 0], 
+parser.add_argument('--pads', nargs='+', type=int, default=[0, 10, 0, 0],
 					help='Padding (top, bottom, left, right). Please adjust to include chin at least')
 
 parser.add_argument('--face_det_batch_size', type=int, 
 					help='Batch size for face detection', default=16)
+
 parser.add_argument('--wav2lip_batch_size', type=int, help='Batch size for Wav2Lip model(s)', default=128)
 
 parser.add_argument('--resize_factor', default=1, type=int, 
@@ -53,8 +52,8 @@ parser.add_argument('--nosmooth', default=False, action='store_true',
 args = parser.parse_args()
 args.img_size = 96
 
-if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-	args.static = True
+# if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+# 	args.static = True
 
 def get_smoothened_boxes(boxes, T):
 	for i in range(len(boxes)):
@@ -74,7 +73,7 @@ def face_detect(images):
 	while 1:
 		predictions = []
 		try:
-			for i in tqdm(range(0, len(images), batch_size)):
+			for i in range(0, len(images), batch_size):
 				predictions.extend(detector.get_detections_for_batch(np.array(images[i:i + batch_size])))
 		except RuntimeError:
 			if batch_size == 1: 
@@ -91,40 +90,53 @@ def face_detect(images):
 			cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
 			raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
 
-		y1 = max(0, rect[1] - pady1)
-		y2 = min(image.shape[0], rect[3] + pady2)
-		x1 = max(0, rect[0] - padx1)
-		x2 = min(image.shape[1], rect[2] + padx2)
+		y1 = max(0, rect[1] - pady1) - 40
+		y2 = min(image.shape[0], rect[3] + pady2) + 40
+		x1 = max(0, rect[0] - padx1) - 40
+		x2 = min(image.shape[1], rect[2] + padx2) + 40
 		
 		results.append([x1, y1, x2, y2])
 
 	boxes = np.array(results)
-	if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
+	# if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
 	results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
+	# print(results)
+	# exit(0)
+	# del detector
+	# if not os.path.isfile('res.npy'):
+	# 	with open('res.npy', 'wb') as f:
+	# 		np.save(f, results.cpu().numpy())
+	# else:
 
-	del detector
 	return results 
 
-def datagen(frames, mels):
+def datagen(frames, mels, hk=0):
 	img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
-
-	if args.box[0] == -1:
-		if not args.static:
-			face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
-		else:
-			face_det_results = face_detect([frames[0]])
-	else:
-		print('Using the specified bounding box instead of face detection...')
-		y1, y2, x1, x2 = args.box
-		face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
+	# face_det_results = hk
+	face_det_results = torch.load('res1.pth')
+	# if args.box[0] == -1:
+	# 	face_det_results = face_detect(frames) # BGR2RGB for CNN face detection
+	# 	# torch.save(face_det_results, 'res1.pth')
+	# 	# with NpyAppendArray('res.npy') as f:
+	# 	# 	f.append(face_det_results)
+	# 	# 	# np.save(f, np.array(results))
+	#
+	# 	# if not args.static:
+	# 	# 	pass
+	# 	# else:
+	# 	# 	face_det_results = face_detect([frames[0]])
+	# else:
+	# 	print('Using the specified bounding box instead of face detection...')
+	# 	y1, y2, x1, x2 = args.box
+	# 	face_det_results = [[f[y1: y2, x1:x2], (y1, y2, x1, x2)] for f in frames]
 
 	for i, m in enumerate(mels):
-		idx = 0 if args.static else i%len(frames)
+		idx = i%len(frames)
 		frame_to_save = frames[idx].copy()
 		face, coords = face_det_results[idx].copy()
 
 		face = cv2.resize(face, (args.img_size, args.img_size))
-			
+
 		img_batch.append(face)
 		mel_batch.append(m)
 		frame_batch.append(frame_to_save)
@@ -157,24 +169,17 @@ mel_step_size = 16
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print('Using {} for inference.'.format(device))
 
-def _load(checkpoint_path):
-	if device == 'cuda':
-		checkpoint = torch.load(checkpoint_path)
-	else:
-		checkpoint = torch.load(checkpoint_path,
-								map_location=lambda storage, loc: storage)
-	return checkpoint
+# def _load(checkpoint_path):
+# 	if device == 'cuda':
+# 		checkpoint = torch.load(checkpoint_path)
+# 	else:
+# 		checkpoint = torch.load(checkpoint_path,
+# 								map_location=lambda storage, loc: storage)
+# 	return checkpoint
 
 def load_model(path):
 	model = Wav2Lip()
-	print("Load checkpoint from: {}".format(path))
-	checkpoint = _load(path)
-	s = checkpoint["state_dict"]
-	new_s = {}
-	for k, v in s.items():
-		new_s[k.replace('module.', '')] = v
-	model.load_state_dict(new_s)
-
+	model.load_state_dict(torch.load(path))
 	model = model.to(device)
 	return model.eval()
 
@@ -185,6 +190,7 @@ def main():
 	elif args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
 		full_frames = [cv2.imread(args.face)]
 		fps = args.fps
+
 
 	else:
 		video_stream = cv2.VideoCapture(args.face)
@@ -244,16 +250,17 @@ def main():
 	full_frames = full_frames[:len(mel_chunks)]
 
 	batch_size = args.wav2lip_batch_size
+
+	# data_hk = torch.load('res.pth')
 	gen = datagen(full_frames.copy(), mel_chunks)
 
-	for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
-											total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
+	for i, (img_batch, mel_batch, frames, coords) in enumerate(gen):
 		if i == 0:
 			model = load_model(args.checkpoint_path)
 			print ("Model loaded")
 
 			frame_h, frame_w = full_frames[0].shape[:-1]
-			out = cv2.VideoWriter('temp/result.avi', 
+			out = cv2.VideoWriter('temp/result.avi',
 									cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
 
 		img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
@@ -263,18 +270,52 @@ def main():
 			pred = model(mel_batch, img_batch)
 
 		pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
-		
+		o = 0
 		for p, f, c in zip(pred, frames, coords):
+			o += 1
 			y1, y2, x1, x2 = c
 			p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
 
 			f[y1:y2, x1:x2] = p
+
+			diff_x = 256 - (x2 - x1)
+			diff_y = 256 - (y2 - y1)
+
+			ny1 = int(y1 - diff_y/2)
+			ny2 = int(y2 + diff_y/2)
+			nx1 = int(x1 - diff_x/2)
+			nx2 = int(x2 + diff_x/2)
+			print(ny1, ny2, nx2, nx1)
+			# 88
+			# 278
+			# 541
+			# 406
+			crop = f[ny1:ny2, nx1:nx2]
+			dp = cv2.resize(crop, (512, 512))
+
+			# imwrite(dp, os.path.join('tempo', f'_{o:02d}.png'))
+			if o < 10:
+				file_restored = "_0{}_00.png".format(o)
+			else:
+				file_restored = "_{}_00.png".format(o)
+
+			image = cv2.imread('tempo/{}'.format(file_restored))
+			image = cv2.resize(image, (256, 256))
+			f[ny1:ny2, nx1:nx2] = image
 			out.write(f)
 
+	# torch.save(data_hk, 'res.pth')
 	out.release()
+
+	start_time = time.perf_counter()
+	print('*' * 30)
 
 	command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
 	subprocess.call(command, shell=platform.system() != 'Windows')
+
+	end_time = time.perf_counter()
+	total_time = end_time - start_time
+	print(f'ffmpeg took {total_time:.3f} seconds')
 
 if __name__ == '__main__':
 	main()
